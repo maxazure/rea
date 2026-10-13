@@ -22,6 +22,7 @@ import {
 } from "../../domain/analysisView/analysisView.js";
 import { jsonValueSchema } from "../../domain/jsonValue.js";
 import { err, ok, type Result } from "../../domain/result.js";
+import { admitOrdinaryAnalysisData } from "../../domain/analysisView/ordinaryAnalysisData.js";
 import { WebNetworkApiSurfaceAccumulator } from "../../domain/analysisView/WebNetworkApiSurfaceAccumulator.js";
 
 /** Authenticate a selected-view request and project already completed Evidence. */
@@ -51,8 +52,11 @@ export const inspectAnalysisViewValidated = (
     input.view.kind === "api-surface"
       ? new WebNetworkApiSurfaceAccumulator()
       : undefined;
-  if (input.source.kind === "inline" && accumulator !== undefined) {
-    const admitted = accumulator.admitInlineEvidence(input.source.evidence);
+  if (input.source.kind === "inline") {
+    const admitted =
+      accumulator === undefined
+        ? admitOrdinaryAnalysisData(input.source.evidence)
+        : accumulator.admitInlineEvidence(input.source.evidence);
     if (!admitted.ok) return admitted;
   }
   const resolved = resolveAnalysisViewSource(input.source, lookup);

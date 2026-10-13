@@ -433,27 +433,163 @@ it("refuses an object-dense borrowed capture before making a full schema clone",
   expect(ledger.forAnalysis(parent.evidence_id)).toBe(borrowed);
 });
 
-it("borrows inline Evidence until admission without invoking nested accessors", () => {
-  let accessed = false;
-  const evidence = {
-    get normalized_result() {
-      accessed = true;
-      throw new Error("Evidence must be admitted before parsing");
-    },
-  };
-  const input = {
-    source: { kind: "inline", evidence },
-    view: { kind: "api-surface" },
-  };
-  const parsed = inspectAnalysisViewInputSchema.parse(input);
-  if (parsed.source.kind !== "inline") throw new Error("Expected inline input");
-  expect(parsed.source.evidence).toBe(evidence);
-  expect(inspectAnalysisView(input)).toMatchObject({
-    ok: false,
-    error: { _tag: "AnalysisInputError" },
-  });
-  expect(accessed).toBe(false);
-});
+it.each(["summary", "capture", "api-surface"] as const)(
+  "borrows %s inline Evidence until admission without invoking accessors",
+  (kind) => {
+    let accessed = false;
+    const evidence = {
+      get normalized_result() {
+        accessed = true;
+        throw new Error("Evidence must be admitted before parsing");
+      },
+    };
+    const input = {
+      source: { kind: "inline", evidence },
+      view: { kind },
+    };
+    const parsed = inspectAnalysisViewInputSchema.parse(input);
+    if (parsed.source.kind !== "inline")
+      throw new Error("Expected inline input");
+    expect(parsed.source.evidence).toBe(evidence);
+    expect(inspectAnalysisView(input)).toMatchObject({
+      ok: false,
+      error: { _tag: "AnalysisInputError" },
+    });
+    expect(accessed).toBe(false);
+  },
+);
+
+it.each(["summary", "capture", "api-surface"] as const)(
+  "rejects malformed nested %s parents without invoking hidden getters",
+  (kind) => {
+    let accesses = 0;
+    const getter = {
+      get value() {
+        accesses += 1;
+        throw new Error("Untrusted getter");
+      },
+    };
+    const hidden = {};
+    Object.defineProperty(hidden, "value", {
+      get() {
+        accesses += 1;
+        throw new Error("Hidden getter");
+      },
+    });
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    for (const malformed of [getter, hidden, cycle]) {
+      const parent = structuredClone(analysisViewCaptureEvidence());
+      const result = inspectAnalysisView({
+        source: {
+          kind: "inline",
+          evidence: { ...parent, raw_result: { nested: malformed } },
+        },
+        view: { kind },
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: { _tag: "AnalysisInputError" },
+      });
+    }
+    expect(accesses).toBe(0);
+  },
+);
+
+it.each(["summary", "capture", "api-surface"] as const)(
+  "rejects custom %s array iterators before parsing",
+  (kind) => {
+    let accesses = 0;
+    const ownIterator = ["fixture"];
+    Object.defineProperty(ownIterator, Symbol.iterator, {
+      get() {
+        accesses += 1;
+        throw new Error("Own array iterator");
+      },
+    });
+    const inheritedIterator = ["fixture"];
+    const prototype = Object.create(Array.prototype) as object;
+    Object.defineProperty(prototype, Symbol.iterator, {
+      get() {
+        accesses += 1;
+        throw new Error("Inherited array iterator");
+      },
+    });
+    Object.setPrototypeOf(inheritedIterator, prototype);
+    const ownMap = ["fixture"];
+    Object.defineProperty(ownMap, "map", {
+      get() {
+        accesses += 1;
+        throw new Error("Own array map");
+      },
+    });
+    const ownConstructor = ["fixture"];
+    Object.defineProperty(ownConstructor, "constructor", {
+      get() {
+        accesses += 1;
+        throw new Error("Own array constructor");
+      },
+    });
+    for (const array of [
+      ownIterator,
+      inheritedIterator,
+      ownMap,
+      ownConstructor,
+    ]) {
+      const parent = analysisViewCaptureEvidence();
+      expect(
+        inspectAnalysisView({
+          source: {
+            kind: "inline",
+            evidence: { ...parent, raw_result: array },
+          },
+          view: { kind },
+        }),
+      ).toMatchObject({ ok: false, error: { _tag: "AnalysisInputError" } });
+    }
+    expect(accesses).toBe(0);
+  },
+);
+
+it.each(["summary", "capture", "api-surface"] as const)(
+  "preserves ordinary inline %s Evidence and repeated noncyclic references",
+  (kind) => {
+    const capture = analysisViewCaptureFixture();
+    const shared = { source: "fixture" };
+    const parent = structuredClone(
+      createEvidence(
+        {
+          path: capture.artifact.path,
+          sha256: capture.artifact.sha256!,
+          format: "file",
+        },
+        { id: "fixture", name: "fixture", version: "1" },
+        {
+          operation: "inspect_web_network_capture",
+          parameters: {
+            sensitive_value_count: 0,
+            first: shared,
+            second: shared,
+          },
+          result: capture,
+          confidence: "observed",
+        },
+      ),
+    );
+    const parameters = parent.parameters as Record<string, unknown>;
+    parameters.second = parameters.first;
+    const before = JSON.stringify(parent);
+    expect(
+      inspectAnalysisView({
+        source: { kind: "inline", evidence: parent },
+        view: { kind },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(JSON.stringify(parent)).toBe(before);
+    expect(Object.isFrozen(parent)).toBe(false);
+    expect(parameters.second).toBe(parameters.first);
+  },
+);
 
 it("keeps inline-envelope admission live alongside capture validation and grouping", () => {
   // Each clone alone fits; both graphs coexist while the view is projected.

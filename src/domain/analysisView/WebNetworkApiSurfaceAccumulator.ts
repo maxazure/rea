@@ -1,13 +1,11 @@
 import { z } from "zod";
-import {
-  AnalysisInputError,
-  AnalysisResourceConstraintError,
-} from "../analysisErrorCore.js";
+import { AnalysisResourceConstraintError } from "../analysisErrorCore.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
 import { compareUnicodeCodePoints as compare } from "../unicodeCodePointOrder.js";
 import { parseRecordedTransportUrl } from "../recordedTransportUrl.js";
 import { err, ok, type Result } from "../result.js";
 import { MAX_JSON_DEPTH } from "../jsonValue.js";
+import { admitOrdinaryAnalysisData } from "./ordinaryAnalysisData.js";
 import {
   WEB_NETWORK_CAPTURE_LIMITS,
   type WebNetworkCaptureRecord,
@@ -149,88 +147,43 @@ export class WebNetworkApiSurfaceAccumulator {
 
   /** Reserve schema output and validation scratch while the borrowed parent stays live. */
   admitCaptureClone(value: unknown): Result<void, AnalysisError> {
-    return this.#admitCaptureValue(value, new Set(), 0, false);
+    return this.#admitCaptureValue(value, false);
   }
 
   /** Admit the complete portable envelope before cloning or authenticating it. */
   admitInlineEvidence(value: unknown): Result<void, AnalysisError> {
-    return this.#admitCaptureValue(value, new Set(), 0, true);
+    return this.#admitCaptureValue(value, true);
   }
 
   #admitCaptureValue(
     value: unknown,
-    ancestors: Set<object>,
-    depth: number,
     inline: boolean,
   ): Result<void, AnalysisError> {
-    // Capture records add three levels before reported; inline Evidence adds one.
-    if (
-      depth > MAX_JSON_DEPTH + (inline ? 4 : 3) ||
-      (typeof value === "object" && value !== null && ancestors.has(value))
-    )
-      return this.#invalidCapture();
-    if (!this.#retain(CAPTURE_MEMBER_BYTES)) return this.#overBudget();
-    // Evidence authentication encodes strings and object keys for hashing.
-    // Keep that allowance live alongside the envelope clone and projection.
-    if (
-      inline &&
-      typeof value === "string" &&
-      !this.#retain(textBytes(value.length))
-    )
-      return this.#overBudget();
-    if (typeof value !== "object" || value === null) return ok(undefined);
-    if (!this.#retain(CAPTURE_CONTAINER_BYTES)) return this.#overBudget();
-    ancestors.add(value);
-    // Walk depth-first without building a second capture graph. Member charges
-    // include key enumeration; aliases count each time the schema copies them.
-    if (Array.isArray(value)) {
-      for (let index = 0; index < value.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, index);
-        if (descriptor === undefined || !Object.hasOwn(descriptor, "value"))
-          return this.#invalidCapture();
-        const admitted = this.#admitCaptureValue(
-          descriptor.value,
-          ancestors,
-          depth + 1,
-          inline,
-        );
-        if (!admitted.ok) return admitted;
-      }
-    } else {
-      const prototype: unknown = Object.getPrototypeOf(value);
-      if (prototype !== Object.prototype && prototype !== null)
-        return this.#invalidCapture();
-      // Zod reads named fields even when they are non-enumerable.
-      for (const key of Object.getOwnPropertyNames(value)) {
-        if (inline && !this.#retain(textBytes(key.length)))
+    return admitOrdinaryAnalysisData(value, {
+      // Capture records add three levels before reported; inline Evidence adds one.
+      maximumDepth: MAX_JSON_DEPTH + (inline ? 4 : 3),
+      value: (member) => {
+        if (!this.#retain(CAPTURE_MEMBER_BYTES)) return this.#overBudget();
+        // Authentication encodes strings and keys for hashing; keep this allowance live.
+        if (
+          inline &&
+          typeof member === "string" &&
+          !this.#retain(textBytes(member.length))
+        )
           return this.#overBudget();
-        const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        if (descriptor === undefined || !Object.hasOwn(descriptor, "value"))
-          return this.#invalidCapture();
-        const admitted = this.#admitCaptureValue(
-          descriptor.value,
-          ancestors,
-          depth + 1,
-          inline,
-        );
-        if (!admitted.ok) return admitted;
-      }
-    }
-    ancestors.delete(value);
-    return ok(undefined);
-  }
-
-  #invalidCapture(): Result<never, AnalysisError> {
-    return err(
-      new AnalysisInputError("inspect_analysis_view", undefined, [
-        {
-          path: ["source"],
-          reason: "invalid_value",
-          message:
-            "Parent capture must contain bounded ordinary JSON data without cycles or accessors.",
-        },
-      ]),
-    );
+        if (
+          typeof member === "object" &&
+          member !== null &&
+          !this.#retain(CAPTURE_CONTAINER_BYTES)
+        )
+          return this.#overBudget();
+        return ok(undefined);
+      },
+      key: (key) =>
+        inline && !this.#retain(textBytes(key.length))
+          ? this.#overBudget()
+          : ok(undefined),
+    });
   }
 
   addLimitations(limitations: readonly string[]): Result<void, AnalysisError> {
