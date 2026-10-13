@@ -31,8 +31,14 @@ const hex = (value: bigint) => `0x${value.toString(16)}`;
 const decoded = { status: "decoded" as const, reason: null };
 
 /** Name of a class defined in this image, from its class_ro_t. */
-const localClassName = (read: ObjcDispatchReaders, address: bigint): string =>
-  read.string(read.pointer((read.pointer(address + 32n) & ~7n) + 24n));
+const localClassName = (read: ObjcDispatchReaders, address: bigint): string => {
+  const name = read.string(
+    read.pointer((read.pointer(address + 32n) & ~7n) + 24n),
+  );
+  if (name.length === 0)
+    throw new TypeError(`Objective-C class name is empty at ${hex(address)}`);
+  return name;
+};
 
 /**
  * Resolve a class's superclass: a bind to `_OBJC_CLASS_$_Name` names a class
@@ -208,7 +214,7 @@ export const decodeObjcDispatchFacets = (input: {
     if (address === 0n || visited.has(hex(address)) || !budget.admit()) return;
     visited.add(hex(address));
     const ro = read.pointer(address + 32n) & ~7n;
-    const name = read.string(read.pointer(ro + 24n));
+    const name = localClassName(read, address);
     const root = (read.u32(ro) & 2) !== 0;
     const superclass = resolveSuperclass(read, address, name, failures);
     if (superclass.name === null && superclass.address === null && !root)
