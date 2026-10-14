@@ -1,3 +1,6 @@
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { parseMcpToolError } from "../../fixtures/mcpToolError.js";
 import { ok as resultOk } from "../../../src/domain/result.js";
 import { readFile, writeFile } from "node:fs/promises";
@@ -244,6 +247,76 @@ describe("server and catalog identity", () => {
 });
 
 describe("live server identity over MCP", () => {
+  it("covers changed rendered prompt objectives in live catalog alignment", async () => {
+    const fixture = fileURLToPath(
+      new URL("../../fixtures/promptCatalogIdentity.mjs", import.meta.url),
+    );
+    const snapshotSchema = z.object({
+      rendered: z.object({
+        messages: z.array(
+          z.object({
+            content: z.object({ type: z.literal("text"), text: z.string() }),
+          }),
+        ),
+      }),
+      identity: sessionProvider.shape.server_identity,
+    });
+    const snapshot = async (change: string, expected?: string) => {
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [fixture, change, ...(expected === undefined ? [] : [expected])],
+        { timeout: 20_000, maxBuffer: 1024 * 1024 },
+      );
+      return snapshotSchema.parse(JSON.parse(stdout));
+    };
+    const baseline = await snapshot("unchanged");
+    const original = baseline.identity.catalog.digests;
+    const unchanged = await snapshot("unchanged", original.combined_sha256);
+    expect(unchanged.rendered).toEqual(baseline.rendered);
+    expect(unchanged.identity.catalog).toEqual(baseline.identity.catalog);
+    expect(unchanged.identity.alignment).toEqual({
+      state: "aligned",
+      reasons: [],
+      remediation: null,
+    });
+
+    const changed = await snapshot("objective", original.combined_sha256);
+    expect(changed.rendered.messages[0]?.content.text).toContain(
+      "Changed fixture objective.",
+    );
+    expect(changed.rendered).not.toEqual(baseline.rendered);
+    expect(changed.identity.catalog.digests.tools_sha256).toBe(
+      original.tools_sha256,
+    );
+    expect(changed.identity.catalog.digests.prompts_sha256).not.toBe(
+      original.prompts_sha256,
+    );
+    expect(changed.identity.catalog.digests.combined_sha256).not.toBe(
+      original.combined_sha256,
+    );
+    expect(changed.identity.alignment).toEqual({
+      state: "mcp_server_restart_required",
+      reasons: ["catalog_digest_mismatch"],
+      remediation:
+        "Restart the registered MCP server/client, then compare identity again.",
+    });
+
+    const title = await snapshot("title", original.combined_sha256);
+    expect(title.rendered.messages[0]?.content.text).toContain(
+      "Changed fixture title.",
+    );
+    expect(title.identity.catalog.digests.tools_sha256).toBe(
+      original.tools_sha256,
+    );
+    expect(title.identity.catalog.digests.prompts_sha256).not.toBe(
+      original.prompts_sha256,
+    );
+    expect(title.identity.catalog.digests.combined_sha256).not.toBe(
+      original.combined_sha256,
+    );
+    expect(title.identity.alignment.state).toBe("mcp_server_restart_required");
+  }, 30_000);
+
   it("exposes live identity, a stable catalog, and changing availability", async () => {
     const session = createTestBinarySession(availabilityProvider());
     const server = createServer({ kind: "session", session });

@@ -47,6 +47,7 @@ const promptCatalog = PROMPT_CONTRACTS.map((contract) => ({
   name: contract.name,
   title: contract.title,
   description: contract.description,
+  objective: contract.objective,
   arguments: contract.arguments,
   steps: contract.steps,
 })).sort((left, right) => compareUnicodeCodePoints(left.name, right.name));
