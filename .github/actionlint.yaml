@@ -2,5 +2,6 @@ self-hosted-runner:
   labels:
     - hopper
     - ghidra-12-1-2
+    - maxfast
     # Hosted label introduced after the pinned actionlint release.
     - macos-15-intel

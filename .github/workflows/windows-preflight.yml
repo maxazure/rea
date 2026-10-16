@@ -1,0 +1,327 @@
+# Fork-only manual control plane. Dispatch main; candidate code is explicitly trusted by the owner.
+# Reviewed candidate: 221ed547c10f72a92df23903db2de87b448e0be5
+# No shared build caches, provider installation, secrets, or security configuration changes.
+name: Manual Windows preflight (fork only)
+run-name: Windows preflight ${{ inputs.candidate_sha }}
+'on':
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Reviewed full lowercase 40-character commit SHA in maxazure/rea (executes code on MAXFAST)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: maxazure-rea-windows-preflight
+  cancel-in-progress: false
+env:
+  HUSKY: '0'
+jobs:
+  native:
+    name: Build exact-candidate Windows fixtures
+    if: github.repository == 'maxazure/rea' && github.actor == 'maxazure' && github.triggering_actor == 'maxazure' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+    - name: Validate immutable candidate input
+      id: source
+      env:
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      run: |
+        set -euo pipefail
+        if [[ ! "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          echo '::error::candidate_sha must be exactly 40 lowercase hexadecimal characters.'
+          exit 1
+        fi
+        printf 'sha=%s\n' "$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        repository: maxazure/rea
+        ref: ${{ steps.source.outputs.sha }}
+        persist-credentials: false
+      id: linux_1
+    - name: Verify candidate identity and reviewed lane contracts
+      env:
+        CANDIDATE_SHA: ${{ steps.source.outputs.sha }}
+      run: |
+        set -euo pipefail
+        test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+        python3 - <<'PYGUARD'
+        import hashlib, pathlib, re
+        root = pathlib.Path('.')
+        text = (root / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+        expected = {'windows-curated': '2f3d534560d85535cc390b1c4ad0423edb8297750c0add64c2766f526ee223dc', 'windows-native-build': 'c3d216ab615714c195d6ba45313c70b5e91a6d52828c8865136ed33c331cb803'}
+        for key, digest in expected.items():
+            match = re.search(r'^  ' + re.escape(key) + r':\n.*?(?=^  [a-zA-Z0-9_-]+:|\Z)', text, re.M | re.S)
+            if match is None or hashlib.sha256(match.group(0).encode()).hexdigest() != digest:
+                raise SystemExit(f'{key} changed since review. Review and update this trusted workflow before running.')
+        paths = ['src/application/Update.test.ts', 'src/ghidra/GhidraInstallation.test.ts', 'src/ghidra/GhidraLauncherEnvironment.test.ts', 'src/process/ProcessOwnership.part2.test.ts', 'src/process/ProcessOwnership.part3.test.ts', 'src/process/ProcessOwnership.test.ts', 'src/process/ProcessOwnership.validation.test.ts', 'src/process/capture/FilesystemSnapshot.test.ts', 'src/windows/WindowsNativeLoader.test.ts', 'src/windows/WindowsOwnedProcess.test.ts', 'tests/acceptance/setup/homeDirectoryFallback.test.ts', 'tests/acceptance/webModuleCli.test.ts', 'tests/acceptance/webSourceLocationCli.test.ts', 'tests/boundary/android/workspaceGuardianRetry.test.ts', 'tests/boundary/cli/referenceSourceImportStatus.test.ts', 'tests/boundary/filesystem/asarInventoryFreshness.test.ts', 'tests/boundary/filesystem/binaryTarget.test.ts', 'tests/boundary/filesystem/directoryArtifactReaderOpen.test.ts', 'tests/boundary/filesystem/ghidraJavaProbe.test.ts', 'tests/boundary/filesystem/javascript-applications/javascriptArtifactReconstruction.test.ts', 'tests/boundary/filesystem/javascriptApplicationWorkflows.test.ts', 'tests/boundary/filesystem/javascriptArtifactContentIdentity.test.ts', 'tests/boundary/filesystem/javascriptPackagePrecedence.test.ts', 'tests/boundary/filesystem/safeOutputTree.test.ts', 'tests/boundary/filesystem/setupUnavailableProvider.test.ts', 'tests/boundary/filesystem/webScriptManifestPaths.test.ts', 'tests/boundary/filesystem/windowsNpxRegistration.test.ts', 'tests/boundary/process/ProcessEvidence.host.test.ts', 'tests/boundary/process/packageNpmInvocation.test.ts', 'tests/boundary/process/sourceMapUncHosts.test.ts', 'tests/boundary/process/windowsOutputCapture.test.ts', 'tests/boundary/providers/ghidra/ghidraLauncher.test.ts', 'tests/boundary/providers/ghidra/ghidraTargetSnapshot.test.ts', 'tests/boundary/providers/ghidra/ghidraTransport.test.ts', 'tests/boundary/providers/hopper/hopperClient.cleanupRetry.test.ts', 'tests/boundary/providers/native/artifactProvider.archiveSafety.test.ts', 'tests/boundary/providers/native/artifactProvider.extractionCompleteness.test.ts', 'tests/conformance/providers/ghidra/realGhidraWindowsWorkflow.test.ts', 'tests/conformance/providers/ghidra/windowsCapabilities.test.ts', 'tests/process-global/curatedWindowsLane.test.ts', 'tests/process-global/filesystemSnapshotFallbackCancellation.test.ts', 'tests/process-global/runnerCancellation.test.ts', 'tests/process-global/updateMaintenance.test.ts', 'tests/process-global/windowsOwnedCommand.test.ts']
+        for name in paths:
+            if not (root / name).is_file():
+                raise SystemExit(f'Reviewed test is missing: {name}')
+        if (root / '.nvmrc').read_text().strip() != '24.18.0':
+            raise SystemExit('Pinned Node version changed. Review before running.')
+        print(f'Reviewed lane contracts match; {len(paths)} unique test paths exist.')
+        PYGUARD
+      id: linux_2
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version-file: .nvmrc
+      id: linux_3
+    - name: Prepare cross compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y g++-mingw-w64-x86-64
+      id: linux_4
+    - run: npm run build:windows-native
+      id: linux_5
+    - run: npm run verify:windows-native:artifact
+      id: linux_6
+    - run: node scripts/build-windows-native.mjs --inspection-fixture
+      id: linux_7
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: windows-native-inspection-fixture
+        path: .cache/windows-native-inspection-fixture/
+        if-no-files-found: error
+        retention-days: 7
+      id: linux_8
+    - name: Build Windows process boundary fixture
+      run: |
+        mkdir -p .cache/windows-process-boundary
+        x86_64-w64-mingw32-g++ -municode -std=c++17 -O2 -static -Wall -Wextra \
+          -o .cache/windows-process-boundary/process-boundary.exe \
+          tests/fixtures/windows/processBoundary.cc -ladvapi32
+      id: linux_9
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: windows-process-boundary-fixture
+        path: .cache/windows-process-boundary/
+        if-no-files-found: error
+        retention-days: 7
+      id: linux_10
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: windows-native-controls
+        path: native/windows/build/
+        if-no-files-found: error
+        retention-days: 7
+      id: linux_11
+    - name: Record artifact build result
+      if: always()
+      env:
+        CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        JOB_STATUS: ${{ job.status }}
+        STEP_RESULTS: ${{ toJSON(steps) }}
+      run: |
+        python3 - <<'PYSUMMARY'
+        import json, os, pathlib
+        report = {key: os.environ[key] for key in ['CANDIDATE_SHA', 'RUNNER_NAME', 'RUNNER_OS', 'RUNNER_ARCH', 'JOB_STATUS']}
+        report['steps'] = json.loads(os.environ['STEP_RESULTS'])
+        path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'windows-preflight-linux.json'
+        path.write_text(json.dumps(report, indent=2))
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write('## Windows preflight: Linux artifacts\n\n```json\n' + json.dumps(report, indent=2) + '\n```\n')
+        PYSUMMARY
+      id: linux_12
+    - name: Upload artifact build report
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: windows-preflight-linux-report
+        path: ${{ runner.temp }}/windows-preflight-linux.json
+        retention-days: 7
+        if-no-files-found: warn
+      id: linux_13
+  windows:
+    name: Run reviewed Windows gates on MAXFAST
+    needs: native
+    if: github.repository == 'maxazure/rea' && github.actor == 'maxazure' && github.triggering_actor == 'maxazure' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on:
+    - self-hosted
+    - Windows
+    - X64
+    - maxfast
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+    - name: Check required Windows runner tools
+      shell: powershell
+      run: |
+        "PREFLIGHT_REPORT_DIRECTORY=$env:PREFLIGHT_REPORT_DIRECTORY" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        New-Item -ItemType Directory -Force $env:PREFLIGHT_REPORT_DIRECTORY | Out-Null
+        $ErrorActionPreference = 'Stop'
+        foreach ($tool in @('git', 'pwsh')) {
+          if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            throw "Required runner tool '$tool' is missing. Stop and ask the owner to install/configure it; this workflow does not change runner security or services."
+          }
+        }
+        & pwsh -NoLogo -NoProfile -NonInteractive -Command 'if ($PSVersionTable.PSVersion.Major -lt 7) { exit 1 }'
+        if ($LASTEXITCODE -ne 0) { throw 'PowerShell 7 or newer is required.' }
+        git --version
+        if ($LASTEXITCODE -ne 0) { throw 'Git is not working on this runner.' }
+      id: windows_0
+      env:
+        PREFLIGHT_REPORT_DIRECTORY: ${{ runner.temp }}/rea-windows-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      with:
+        repository: maxazure/rea
+        ref: ${{ needs.native.outputs.sha }}
+        persist-credentials: false
+      id: windows_1
+    - name: Verify exact candidate and Windows x64 host
+      env:
+        CANDIDATE_SHA: ${{ needs.native.outputs.sha }}
+      run: |
+        $actual = git rev-parse HEAD
+        if ($LASTEXITCODE -ne 0 -or $actual.Trim() -cne $env:CANDIDATE_SHA) { throw 'Candidate SHA mismatch' }
+        if ($env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ARCH -ne 'X64') { throw 'Expected Windows x64 runner' }
+        New-Item -ItemType Directory -Force $env:PREFLIGHT_REPORT_DIRECTORY | Out-Null
+      id: windows_2
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version-file: .nvmrc
+      id: windows_3
+    - run: |
+        & {
+          npm ci
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-4.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_4
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: windows-native-controls
+        path: native/windows/build/
+      id: windows_5
+    - run: |
+        & {
+          npm run verify:windows-native:artifact
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-6.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_6
+    - run: |
+        & {
+          npm run build:cached
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-7.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_7
+    - name: Record named Windows host capabilities
+      run: |
+        & {
+          node scripts/windows-capabilities.mjs | Out-File -Encoding utf8NoBOM windows-capabilities.json
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-8.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: capabilities
+    - name: Validate Windows host capability report
+      run: |
+        & {
+          node -e "const report = JSON.parse(require('node:fs').readFileSync('windows-capabilities.json', 'utf8')); if (report.platform !== 'win32' || report.architecture !== 'x64') throw new Error('expected a Windows x64 capability report');"
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-9.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_9
+    - name: Run curated Windows capability tests
+      run: |
+        & {
+          npx vitest run --coverage.enabled=false src/process/capture/FilesystemSnapshot.test.ts tests/process-global/filesystemSnapshotFallbackCancellation.test.ts tests/boundary/filesystem/binaryTarget.test.ts tests/boundary/filesystem/safeOutputTree.test.ts tests/boundary/providers/native/artifactProvider.archiveSafety.test.ts tests/boundary/providers/native/artifactProvider.extractionCompleteness.test.ts tests/boundary/filesystem/setupUnavailableProvider.test.ts tests/boundary/filesystem/windowsNpxRegistration.test.ts tests/boundary/android/workspaceGuardianRetry.test.ts tests/acceptance/setup/homeDirectoryFallback.test.ts tests/boundary/filesystem/javascriptApplicationWorkflows.test.ts tests/boundary/filesystem/webScriptManifestPaths.test.ts tests/boundary/process/ProcessEvidence.host.test.ts tests/boundary/process/packageNpmInvocation.test.ts tests/boundary/process/windowsOutputCapture.test.ts tests/acceptance/webModuleCli.test.ts tests/acceptance/webSourceLocationCli.test.ts tests/boundary/cli/referenceSourceImportStatus.test.ts tests/boundary/filesystem/asarInventoryFreshness.test.ts tests/boundary/filesystem/javascript-applications/javascriptArtifactReconstruction.test.ts tests/conformance/providers/ghidra/windowsCapabilities.test.ts src/ghidra/GhidraInstallation.test.ts tests/boundary/filesystem/ghidraJavaProbe.test.ts tests/boundary/providers/ghidra/ghidraTransport.test.ts tests/boundary/providers/ghidra/ghidraTargetSnapshot.test.ts tests/boundary/providers/ghidra/ghidraLauncher.test.ts tests/boundary/providers/hopper/hopperClient.cleanupRetry.test.ts src/windows/WindowsNativeLoader.test.ts src/windows/WindowsOwnedProcess.test.ts src/ghidra/GhidraLauncherEnvironment.test.ts src/process/ProcessOwnership.test.ts src/process/ProcessOwnership.part2.test.ts src/process/ProcessOwnership.part3.test.ts src/process/ProcessOwnership.validation.test.ts src/application/Update.test.ts tests/process-global/updateMaintenance.test.ts tests/process-global/runnerCancellation.test.ts tests/process-global/windowsOwnedCommand.test.ts tests/conformance/providers/ghidra/realGhidraWindowsWorkflow.test.ts
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-10.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_10
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: windows-process-boundary-fixture
+        path: .cache/windows-process-boundary/
+      id: windows_11
+    - run: |
+        & {
+          npm run verify:windows-native -- . "$env:GITHUB_WORKSPACE\.cache\windows-process-boundary\process-boundary.exe"
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-12.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_12
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: windows-native-inspection-fixture
+        path: .cache/windows-native-inspection-fixture/
+      id: windows_13
+    - name: Verify native inspection failure ownership and recovery
+      run: |
+        & {
+          node scripts/verify-windows-native-inspection.mjs
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-14.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_14
+    - name: Verify real Node Inspector discovery and observation
+      timeout-minutes: 10
+      env:
+        NODE_OPTIONS: --max-old-space-size=1024
+        UV_THREADPOOL_SIZE: '2'
+      run: |
+        & {
+          npm run verify:inspector
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-15.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_15
+    - run: |
+        & {
+          npm run verify:package:windows
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-16.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_16
+    - name: Verify native directory identity on Node 24
+      run: |
+        & {
+          npx vitest run --coverage.enabled=false tests/boundary/filesystem/directoryArtifactReaderOpen.test.ts tests/boundary/filesystem/javascriptPackagePrecedence.test.ts tests/boundary/filesystem/javascriptArtifactContentIdentity.test.ts
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-17.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_17
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: 22.19.0
+      id: windows_18
+    - name: Verify native path boundaries on Node 22
+      run: |
+        & {
+          npx vitest run --coverage.enabled=false tests/boundary/filesystem/directoryArtifactReaderOpen.test.ts tests/boundary/filesystem/javascriptPackagePrecedence.test.ts tests/boundary/filesystem/javascriptArtifactContentIdentity.test.ts tests/boundary/process/sourceMapUncHosts.test.ts
+        } 2>&1 | Tee-Object -FilePath (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'step-19.log')
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      id: windows_19
+    - name: Record Windows result and failed or skipped stages
+      if: always()
+      env:
+        CANDIDATE_SHA: ${{ needs.native.outputs.sha }}
+        JOB_STATUS: ${{ job.status }}
+        STEP_RESULTS: ${{ toJSON(steps) }}
+        CAPABILITIES_RESULT: ${{ steps.capabilities.outcome }}
+      run: |
+        New-Item -ItemType Directory -Force $env:PREFLIGHT_REPORT_DIRECTORY | Out-Null
+        $report = [ordered]@{
+          candidate_sha = $env:CANDIDATE_SHA
+          runner_name = $env:RUNNER_NAME
+          runner_os = $env:RUNNER_OS
+          runner_arch = $env:RUNNER_ARCH
+          os_version = [System.Environment]::OSVersion.VersionString
+          job_status = $env:JOB_STATUS
+          steps = ($env:STEP_RESULTS | ConvertFrom-Json)
+        }
+        $json = $report | ConvertTo-Json -Depth 20
+        [System.IO.File]::WriteAllText((Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'result.json'), $json, (New-Object System.Text.UTF8Encoding($false)))
+        '## Windows preflight result' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        '```json' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        $json | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+        if ($env:CAPABILITIES_RESULT -eq 'success' -and (Test-Path windows-capabilities.json)) { Copy-Item windows-capabilities.json (Join-Path $env:PREFLIGHT_REPORT_DIRECTORY 'windows-capabilities.json') }
+      id: windows_20
+      shell: powershell
+    - name: Upload Windows reports
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: windows-preflight-reports
+        path: ${{ env.PREFLIGHT_REPORT_DIRECTORY }}
+        if-no-files-found: warn
+        retention-days: 7
+      id: windows_21
