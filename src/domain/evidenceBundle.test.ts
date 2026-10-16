@@ -6,6 +6,7 @@ import {
   createEvidenceBundle,
   createImmutableEvidenceBundle,
   NonCanonicalEvidenceBundleError,
+  EvidenceBundleInputError,
   describeEvidenceBundleFailure,
   evidenceBundleForTarget,
   parseEvidenceBundle,
@@ -306,6 +307,8 @@ describe("immutable serialization bundles", () => {
     };
     expect(() => parseEvidenceBundle(Object.freeze(tampered))).toThrow();
     expect(() => createImmutableEvidenceBundle(tampered.records)).toThrow();
-    expect(() => createImmutableEvidenceBundle([evidence, evidence])).toThrow();
+    expect(() => createImmutableEvidenceBundle([evidence, evidence])).toThrow(
+      EvidenceBundleInputError,
+    );
   });
 });

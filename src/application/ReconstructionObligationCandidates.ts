@@ -36,6 +36,14 @@ export interface ReconstructionObligationCandidateSet {
   readonly limitations: readonly string[];
 }
 
+/** A caller-supplied ledger reference violates an input constraint. */
+export class ReconstructionObligationInputError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReconstructionObligationInputError";
+  }
+}
+
 /** Derive conservative candidates from graph, process, and reviewed inputs. */
 export const deriveReconstructionObligationCandidates = (
   bundleInput: EvidenceBundle,
@@ -322,7 +330,7 @@ const reviewedCandidate = (
     authority_references: reviewEvidenceIds.map((evidenceId) => {
       const evidence = records.get(evidenceId);
       if (evidence === undefined)
-        throw new TypeError(
+        throw new ReconstructionObligationInputError(
           `Reviewed obligation Evidence is missing: ${evidenceId}`,
         );
       return {

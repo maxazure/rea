@@ -52,8 +52,16 @@ export const evidenceBundleSchema = z.strictObject({
 export type EvidenceBundle = z.infer<typeof evidenceBundleSchema>;
 const immutableBundles = new WeakMap<object, EvidenceBundle>();
 
+/** Caller-supplied bundle content violates an authenticated input constraint. */
+export class EvidenceBundleInputError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "EvidenceBundleInputError";
+  }
+}
+
 /** Caller input has valid shape but is not in authenticated canonical form. */
-export class NonCanonicalEvidenceBundleError extends TypeError {
+export class NonCanonicalEvidenceBundleError extends EvidenceBundleInputError {
   constructor() {
     super("Evidence bundle manifests are not canonical");
     this.name = "NonCanonicalEvidenceBundleError";
@@ -70,7 +78,9 @@ export const createImmutableEvidenceBundle = (
     new Set(checkedRecords.map(({ evidence_id }) => evidence_id)).size !==
     checkedRecords.length
   )
-    throw new TypeError("Evidence bundle contains duplicate record IDs");
+    throw new EvidenceBundleInputError(
+      "Evidence bundle contains duplicate record IDs",
+    );
   const checkedUnknowns = unknowns.map((unknown) =>
     residualUnknownSchema.parse(unknown),
   );
@@ -290,7 +300,9 @@ const authenticateBundle = (
 ): EvidenceBundle => {
   const recordIds = parsed.records.map(({ evidence_id: id }) => id);
   if (new Set(recordIds).size !== recordIds.length)
-    throw new TypeError("Evidence bundle contains duplicate record IDs");
+    throw new EvidenceBundleInputError(
+      "Evidence bundle contains duplicate record IDs",
+    );
   validateUnknownGraph(parsed.unknowns, parsed.records);
   const canonical = createEvidenceBundle(
     parsed.records.map((record, index) => {
@@ -343,7 +355,7 @@ const validateUnknownGraph = (
     );
     for (const [index, revision] of history.entries()) {
       if (revision.revision !== index + 1)
-        throw new TypeError(
+        throw new EvidenceBundleInputError(
           `Residual unknown ${id} revision history has a gap`,
         );
       if (
@@ -351,7 +363,9 @@ const validateUnknownGraph = (
         revision.previous_revision_digest !==
           history[index - 1]?.revision_digest
       )
-        throw new TypeError(`Residual unknown ${id} revision chain is broken`);
+        throw new EvidenceBundleInputError(
+          `Residual unknown ${id} revision chain is broken`,
+        );
     }
     const head = history.at(-1);
     if (head === undefined)
@@ -367,12 +381,12 @@ const validateUnknownGraph = (
     ];
     for (const evidenceId of referencedEvidence)
       if (!evidenceById.has(evidenceId))
-        throw new TypeError(
+        throw new EvidenceBundleInputError(
           `Residual unknown references missing evidence ${evidenceId}`,
         );
     for (const relationship of unknown.relationships)
       if (!unknownById.has(relationship.unknown_id))
-        throw new TypeError(
+        throw new EvidenceBundleInputError(
           `Residual unknown references missing unknown ${relationship.unknown_id}`,
         );
     if (unknown.resolution?.disposition === "verified")
@@ -386,7 +400,7 @@ const validateVerifiedResolution = (
   evidenceById: Pick<ReadonlyMap<string, Evidence>, "get">,
 ): void => {
   if (unknown.contradicting_evidence_ids.length > 0)
-    throw new TypeError(
+    throw new EvidenceBundleInputError(
       `Residual unknown ${unknown.unknown_id} retains contradicting evidence`,
     );
   const qualifies = unknown.resolution?.evidence_ids.some((evidenceId) => {
@@ -399,7 +413,7 @@ const validateVerifiedResolution = (
     );
   });
   if (qualifies !== true)
-    throw new TypeError(
+    throw new EvidenceBundleInputError(
       `Residual unknown ${unknown.unknown_id} has no qualifying resolution evidence`,
     );
 };
@@ -538,7 +552,7 @@ const rejectDependencyCycles = (
         if (relationship?.type !== "depends-on") continue;
         const dependency = relationship.unknown_id;
         if (active.has(dependency))
-          throw new TypeError(
+          throw new EvidenceBundleInputError(
             "Residual unknown dependency graph contains a cycle",
           );
         if (visited.has(dependency)) continue;
