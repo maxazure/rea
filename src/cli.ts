@@ -29,6 +29,7 @@ import {
   adaptCliOutputArgumentsForIncur,
   normalizeCliArguments,
   splitIncurBuiltinArguments,
+  unknownMcpAddOption,
 } from "./cliBuiltinArguments.js";
 import {
   parseCliOutputArguments,
@@ -295,6 +296,39 @@ export const createCli = (
               process.stdout.isTTY === true,
             ),
           );
+        (
+          options?.exit ??
+          ((code: number) => {
+            process.exitCode = code;
+          })
+        )(1);
+        return Promise.resolve();
+      }
+      // Mode flags bypass Incur's registration dispatch. Validate registration
+      // only when it would run, before even reading or backing up Amp settings.
+      const unknownOption =
+        flags.has("--mcp") ||
+        flags.has("--update") ||
+        flags.has("--incur-update-check")
+          ? undefined
+          : unknownMcpAddOption(command.slice(builtin + 2));
+      if (unknownOption !== undefined) {
+        const output = parseCliOutputArguments(normalized);
+        write(
+          output.validation.ok
+            ? renderCliDocument(
+                {
+                  code: "PARSE_ERROR",
+                  message: `Unknown flag: ${unknownOption}`,
+                },
+                // A parse error is a document, not a selected row array.
+                output.format === "csv" || output.format === "tsv"
+                  ? "json"
+                  : output.format,
+                process.stdout.isTTY === true,
+              )
+            : renderCliOutputArgumentError(output.validation),
+        );
         (
           options?.exit ??
           ((code: number) => {
