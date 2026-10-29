@@ -24,7 +24,7 @@ import { registerAnalysisViewCommands } from "./cli/analysisViewCommands.js";
 import { registerBinaryDiagnosticsCommands } from "./cli/binaryDiagnosticsCommands.js";
 import { registerFridaCommands } from "./cli/fridaCommands.js";
 import type { FridaInstrumentationPort } from "./application/frida/FridaInstrumentationPort.js";
-import { Cli, z } from "incur";
+import { Cli, SyncMcp, z } from "incur";
 import {
   adaptCliOutputArgumentsForIncur,
   normalizeCliArguments,
@@ -125,6 +125,9 @@ export const createCli = (
     "cli",
     level?.ok === true ? level.value : "silent",
   );
+  const registrationCommand = clientRegistrationCommandText(
+    currentClientRegistrationCommand({ environment }),
+  );
   const timedCli = Cli.create(PRODUCT_IDENTITY.cliBinary, {
     version: PRODUCT_IDENTITY.packageVersion,
     description: "Reverse engineer anything from your terminal or agent.",
@@ -135,9 +138,7 @@ export const createCli = (
         .describe("Write measured command timing to stderr."),
     }),
     mcp: {
-      command: clientRegistrationCommandText(
-        currentClientRegistrationCommand({ environment }),
-      ),
+      command: registrationCommand,
       instructions:
         "Ask what software, artifact, protocol, or behavior the user wants to understand, then choose the available investigation capabilities that can produce evidence.",
     },
@@ -315,6 +316,74 @@ export const createCli = (
         }
         return [token];
       });
+      const output = parseCliOutputArguments(serveArguments);
+      const jsonRegistration =
+        output.validation.ok &&
+        output.format === "json" &&
+        !flags.has("--mcp") &&
+        !flags.has("--update") &&
+        !flags.has("--incur-update-check");
+      let registrationDocument: string | undefined;
+      let registrationFailed = false;
+      const flushRegistration = (): void => {
+        if (registrationDocument !== undefined) write(registrationDocument);
+      };
+      const serveRegistration: typeof serve = (tokens = [], selected) => {
+        if (!jsonRegistration)
+          return serve(adaptCliOutputArgumentsForIncur(tokens), selected);
+        // Incur's builtin mixes progress with its formatted result. Use its
+        // public registration producer directly for JSON, rather than recover
+        // a document from human stdout. Preserve the pinned builtin's option
+        // consumption; argument rejection remains with the admission layers.
+        const rest = splitIncurBuiltinArguments(tokens).command.slice(
+          builtin + 2,
+        );
+        let command = registrationCommand;
+        const agents: string[] = [];
+        for (let index = 0; index < rest.length; index += 1) {
+          if (
+            (rest[index] === "--command" || rest[index] === "-c") &&
+            rest[index + 1]
+          )
+            command = rest[++index]!;
+          else if (rest[index] === "--agent" && rest[index + 1])
+            agents.push(rest[++index]!);
+        }
+        return SyncMcp.register(PRODUCT_IDENTITY.cliBinary, {
+          command,
+          agents,
+          global: !rest.includes("--no-global"),
+        }).then(
+          (result) => {
+            // Amp verification must finish before a success document is sent.
+            registrationDocument = renderCliDocument(
+              { name: PRODUCT_IDENTITY.cliBinary, ...result },
+              "json",
+              process.stdout.isTTY === true,
+            );
+          },
+          (cause: unknown) => {
+            registrationFailed = true;
+            write(
+              renderCliDocument(
+                {
+                  code: "MCP_ADD_FAILED",
+                  message:
+                    cause instanceof Error ? cause.message : String(cause),
+                },
+                "json",
+                process.stdout.isTTY === true,
+              ),
+            );
+            (
+              selected?.exit ??
+              ((code: number) => {
+                process.exitCode = code;
+              })
+            )(1);
+          },
+        );
+      };
       // Incur's Amp registration overwrites an existing rea entry (dropping its
       // environment map) and reports success even when the settings file
       // prevents a save. Guard that path: reject a settings file REA cannot
@@ -414,13 +483,11 @@ export const createCli = (
             options ?? {},
             (tokens, selected) =>
               serveDeclared(tokens, selected, (declared, declaredOptions) =>
-                serve(
-                  adaptCliOutputArgumentsForIncur(declared),
-                  declaredOptions,
-                ),
+                serveRegistration(declared, declaredOptions),
               ),
           );
           return result.then(() => {
+            if (registrationFailed) return;
             let failure: string | undefined;
             try {
               if (!existsSync(settingsPath))
@@ -483,10 +550,13 @@ export const createCli = (
                   process.exitCode = code;
                 })
               )(1);
-            } else if (backupPath !== undefined)
-              process.stderr.write(
-                `Amp MCP registration backup retained at ${backupPath}\n`,
-              );
+            } else {
+              flushRegistration();
+              if (backupPath !== undefined)
+                process.stderr.write(
+                  `Amp MCP registration backup retained at ${backupPath}\n`,
+                );
+            }
           });
         };
 
@@ -511,6 +581,10 @@ export const createCli = (
           },
         );
       }
+      if (jsonRegistration)
+        return serveStrict(normalized, options ?? {}, (tokens, selected) =>
+          serveDeclared(tokens, selected, serveRegistration),
+        ).then(flushRegistration);
     }
     const result = serveStrict(normalized, options ?? {}, (tokens, selected) =>
       serveDeclared(tokens, selected, (declared, declaredOptions) =>
