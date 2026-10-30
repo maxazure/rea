@@ -28,6 +28,7 @@ import { Cli, SyncMcp, z } from "incur";
 import {
   adaptCliOutputArgumentsForIncur,
   normalizeCliArguments,
+  normalizeMcpAddArguments,
   splitIncurBuiltinArguments,
 } from "./cliBuiltinArguments.js";
 import {
@@ -253,7 +254,10 @@ export const createCli = (
   );
   cli.serve = (arguments_ = process.argv.slice(2), options) => {
     if (complete(arguments_, options ?? {})) return Promise.resolve();
-    const normalized = normalizeCliArguments(arguments_);
+    const normalized = normalizeMcpAddArguments(
+      normalizeCliArguments(arguments_),
+      PRODUCT_IDENTITY.cliBinary,
+    );
     const { command, flags } = splitIncurBuiltinArguments(normalized);
     const builtin = command[0] === PRODUCT_IDENTITY.cliBinary ? 1 : 0;
     if (
@@ -304,19 +308,7 @@ export const createCli = (
         )(1);
         return Promise.resolve();
       }
-      // Incur's mcp add parser only understands spaced `--agent amp` forms; an
-      // equals form like `--agent=amp` is silently ignored, which would drop
-      // the requested agent and register against the default target. Normalize
-      // equals forms back to spaced forms before handing over to Incur.
-      const serveArguments = normalized.flatMap((token) => {
-        if (token.startsWith("--agent=") || token.startsWith("--command=")) {
-          const separator = token.indexOf("=");
-          const value = token.slice(separator + 1);
-          return value === "" ? [token] : [token.slice(0, separator), value];
-        }
-        return [token];
-      });
-      const output = parseCliOutputArguments(serveArguments);
+      const output = parseCliOutputArguments(normalized);
       const jsonRegistration =
         output.validation.ok &&
         output.format === "json" &&
@@ -479,7 +471,7 @@ export const createCli = (
 
         const runRegistration = (backupPath?: string): Promise<void> => {
           const result = serveStrict(
-            serveArguments,
+            normalized,
             options ?? {},
             (tokens, selected) =>
               serveDeclared(tokens, selected, (declared, declaredOptions) =>

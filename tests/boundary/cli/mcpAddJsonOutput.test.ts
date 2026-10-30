@@ -1,8 +1,12 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { expect, it } from "vitest";
-import { splitIncurBuiltinArguments } from "../../../src/cliBuiltinArguments.js";
+import {
+  normalizeMcpAddArguments,
+  splitIncurBuiltinArguments,
+} from "../../../src/cliBuiltinArguments.js";
 import { Parser, z } from "incur";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
@@ -300,3 +304,220 @@ it("timing global splitting preserves output values and the global terminator", 
     );
   }
 });
+
+cliTest(
+  "expanded discovery values never register or inspect Amp settings",
+  async ({ cli }) => {
+    for (const initial of [undefined, "malformed settings\n"] as const) {
+      const fixture = await registrationFixture();
+      if (initial !== undefined) {
+        await mkdir(join(fixture.home, ".config", "amp"), { recursive: true });
+        await writeFile(fixture.settings, initial);
+      }
+      for (const agent of [[], ["--agent", "amp"]]) {
+        for (const flag of [
+          "--help",
+          "--llms",
+          "--llms-full",
+          "--version",
+          "--schema",
+        ]) {
+          const result = await cli.run({
+            arguments: ["mcp", "add", ...agent, `--command=${flag}`, "--json"],
+            cwd: fixture.home,
+            environment: fixture.environment,
+            timeoutMs: 20_000,
+          });
+          expect(result.exitCode, `${initial}: ${agent} ${flag}`).toBe(
+            flag === "--schema" ? 1 : 0,
+          );
+          expect(result.stdout).not.toContain("MCP_ADD_FAILED");
+          expect(result.stdout).not.toContain("Registered rea");
+          expect(result.stdout).not.toContain("VALIDATION_ERROR");
+          if (flag === "--schema")
+            expect(JSON.parse(result.stdout)).toMatchObject({
+              code: "SCHEMA_UNAVAILABLE",
+            });
+          if (initial === undefined)
+            await expect(access(fixture.settings)).rejects.toMatchObject({
+              code: "ENOENT",
+            });
+          else expect(await readFile(fixture.settings, "utf8")).toBe(initial);
+          await expect(
+            access(`${fixture.settings}.rea.backup`),
+          ).rejects.toMatchObject({ code: "ENOENT" });
+          expect(await readFile(fixture.log, "utf8")).toBe("");
+        }
+      }
+    }
+  },
+);
+
+it("registration expansion preserves values and existing modes", () => {
+  for (const tail of [
+    ["--command", "--agent=cursor"],
+    ["-c", "--command=literal"],
+    ["--agent", "--command=literal"],
+    ["--sensitive-value", "--command=secret"],
+    ["--sensitiveValue", "--agent=private"],
+    ["--command", "--sensitive-value", "--command=secret"],
+    ["--", "--command=operand", "--agent=operand"],
+    ["--filter-output", "--command=data"],
+    ["--help", "--command=--mcp"],
+    ["--llms", "--agent=--mcp"],
+    ["--version", "--command=--help"],
+    ["--schema", "--command=--llms"],
+  ]) {
+    const args = ["mcp", "add", ...tail];
+    expect(normalizeMcpAddArguments(args, "rea")).toEqual(args);
+  }
+  expect(
+    normalizeMcpAddArguments(
+      ["mcp", "add", "--command", "--no-timings", "--agent=cursor"],
+      "rea",
+    ),
+  ).toEqual(["mcp", "add", "--command", "--no-timings", "--agent=cursor"]);
+  expect(
+    normalizeMcpAddArguments(
+      ["mcp", "add", "--agent=amp", "--command=fixture"],
+      "rea",
+    ),
+  ).toEqual(["mcp", "add", "--agent", "amp", "--command", "fixture"]);
+});
+
+cliTest(
+  "spaced registration values retain equals-shaped literal data",
+  async ({ cli }) => {
+    const fixture = await registrationFixture();
+    for (const option of ["--command", "-c"]) {
+      const result = await cli.run({
+        arguments: [
+          "mcp",
+          "add",
+          "--agent",
+          "claude-code",
+          option,
+          "--agent=cursor",
+          "--json",
+        ],
+        cwd: fixture.home,
+        environment: fixture.environment,
+        timeoutMs: 20_000,
+      });
+      expect(result.exitCode, result.stdout).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        command: "--agent=cursor",
+        agents: ["Fixture {client}"],
+      });
+    }
+    const agent = await cli.run({
+      arguments: [
+        "mcp",
+        "add",
+        "--agent",
+        "--command=fixture",
+        "--command",
+        "fixture-server",
+        "--json",
+      ],
+      cwd: fixture.home,
+      environment: fixture.environment,
+      timeoutMs: 20_000,
+    });
+    expect(agent.exitCode, agent.stdout).toBe(0);
+    const calls = (await readFile(fixture.log, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(calls[0]).toContain("--agent=cursor");
+    expect(calls[1]).toContain("--agent=cursor");
+    expect(calls[2]).toEqual([
+      "add-mcp",
+      "fixture-server",
+      "--name",
+      "rea",
+      "-y",
+      "-g",
+      "-a",
+      "--command=fixture",
+    ]);
+  },
+);
+
+cliTest(
+  "existing help prevents an equals value from starting MCP",
+  async ({ cli }) => {
+    const fixture = await registrationFixture();
+    const hook = join(fixture.home, "startup-guard.mjs");
+    const log = join(fixture.home, "startup.log");
+    await writeFile(log, "");
+    await writeFile(
+      hook,
+      `import { registerHooks } from "node:module";
+import { appendFileSync } from "node:fs";
+registerHooks({ resolve(specifier, context, next) {
+  if (context.parentURL?.endsWith("/incur/dist/Mcp.js") && specifier.startsWith("@modelcontextprotocol/server")) {
+    appendFileSync(process.env.REA_TEST_MCP_STARTUP_LOG, "attempt\\n");
+    throw new Error("MCP startup blocked by regression fixture");
+  }
+  return next(specifier, context);
+}});
+`,
+    );
+    const environment = {
+      ...fixture.environment,
+      NODE_OPTIONS: `--import=${pathToFileURL(hook).href}`,
+      REA_TEST_MCP_STARTUP_LOG: log,
+    };
+    // Verify the guard intercepts the actual lazy server import before startup.
+    const control = await cli.run({
+      arguments: ["mcp", "add", "--mcp"],
+      cwd: fixture.home,
+      environment,
+      timeoutMs: 20_000,
+    });
+    expect(control.exitCode).not.toBe(0);
+    expect(await readFile(log, "utf8")).toContain("attempt");
+    await writeFile(log, "");
+    const result = await cli.run({
+      arguments: ["mcp", "add", "--help", "--command=--mcp"],
+      cwd: fixture.home,
+      environment,
+      timeoutMs: 20_000,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Usage: rea mcp add");
+    expect(await readFile(log, "utf8")).toBe("");
+    expect(await readFile(fixture.log, "utf8")).toBe("");
+  },
+);
+
+cliTest(
+  "declaration-shaped command values retain the entire sensitive literal",
+  async ({ cli }) => {
+    const fixture = await registrationFixture();
+    const literal = "--command=fixture-secret-8071";
+    for (const declaration of ["--sensitive-value", "--sensitiveValue"]) {
+      const result = await cli.run({
+        arguments: [
+          "mcp",
+          "add",
+          "--command",
+          declaration,
+          literal,
+          `--bogus=${literal}`,
+          "--json",
+        ],
+        cwd: fixture.home,
+        environment: fixture.environment,
+        timeoutMs: 20_000,
+      });
+      expect(result.stdout + result.stderr).not.toContain(
+        "fixture-secret-8071",
+      );
+      expect(await readFile(fixture.log, "utf8")).not.toContain(
+        "fixture-secret-8071",
+      );
+    }
+  },
+);
