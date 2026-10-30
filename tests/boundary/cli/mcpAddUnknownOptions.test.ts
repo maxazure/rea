@@ -118,6 +118,118 @@ cliTest(
   },
 );
 
+cliTest.for(["default", "json", "jsonl", "yaml", "toon", "md", "csv", "tsv"])(
+  "unknown registration diagnostics redact declared values in %s output",
+  async (format, { cli }) => {
+    const fixture = await registrationFixture();
+    const directory = join(fixture.home, ".config", "amp");
+    await mkdir(directory, { recursive: true });
+    const original = "malformed settings\n";
+    await writeFile(fixture.settings, original);
+    const literal = "SYNTHETIC_REGISTRATION_LITERAL_83A4";
+    const declarations = [
+      ["--sensitive-value", literal],
+      [`--sensitive-value=${literal}`],
+      ["--sensitiveValue", literal],
+      [`--sensitiveValue=${literal}`],
+    ];
+    for (const declaration of declarations) {
+      const result = await cli.run({
+        arguments: [
+          "mcp",
+          "add",
+          "--agent=amp",
+          `--bogus=${literal}`,
+          ...declaration,
+          ...(format === "default" ? [] : ["--format", format]),
+          ...(format === "csv" || format === "tsv"
+            ? ["--filter-output", "rows", "--columns", "code"]
+            : []),
+        ],
+        cwd: fixture.home,
+        environment: fixture.environment,
+        timeoutMs: 20_000,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).not.toContain(literal);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain("PARSE_ERROR");
+      expect(result.stdout).toContain("--bogus=");
+      expect(result.stdout).toContain("REDACTED");
+      expect(result.stdout).not.toContain("Registered rea");
+      expect(await readFile(fixture.settings, "utf8")).toBe(original);
+      expect(await readdir(directory)).toEqual(["settings.json"]);
+      expect(await readFile(fixture.log, "utf8")).toBe("");
+    }
+  },
+);
+
+cliTest(
+  "registration diagnostics use split declarations and redact the whole message only",
+  async ({ cli }) => {
+    const fixture = await registrationFixture();
+    const literal = "SYNTHETIC_REGISTRATION_LITERAL_83A4";
+    const cases = [
+      {
+        tail: [`--bogus=${literal}`, "--sensitive-value", "--json", literal],
+        message: "Unknown flag: --bogus=[REDACTED]",
+      },
+      {
+        tail: [`--sensitiveValue=${literal}`, `--bogus=${literal}`],
+        message: "Unknown flag: --sensitiveValue=[REDACTED]",
+      },
+      {
+        tail: [
+          `--${literal}-suffix`,
+          "--sensitive-value",
+          literal,
+          `--sensitiveValue=${literal}-suffix`,
+          "--sensitive-value=Unknown flag",
+        ],
+        message: "[REDACTED]: --[REDACTED]",
+      },
+      {
+        // A declaration-shaped output value is not a command declaration.
+        tail: [
+          `--bogus=${literal}`,
+          "--filter-output",
+          `--sensitive-value=${literal}`,
+        ],
+        message: `Unknown flag: --bogus=${literal}`,
+      },
+      {
+        tail: [`--bogus=${literal}`],
+        message: `Unknown flag: --bogus=${literal}`,
+      },
+    ];
+    for (const entry of cases) {
+      const result = await cli.run({
+        arguments: [
+          "mcp",
+          "add",
+          "--agent",
+          "claude-code",
+          ...entry.tail,
+          "--json",
+        ],
+        cwd: fixture.home,
+        environment: fixture.environment,
+        timeoutMs: 20_000,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.stdout)).toEqual({
+        code: "PARSE_ERROR",
+        message: entry.message,
+      });
+      expect(result.stderr).toBe("");
+      expect(await readFile(fixture.log, "utf8")).toBe("");
+      await expect(access(fixture.settings)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    }
+  },
+);
+
 cliTest(
   "unknown registration options precede Amp settings validation and backup",
   async ({ cli }) => {

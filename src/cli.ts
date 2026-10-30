@@ -27,10 +27,12 @@ import type { FridaInstrumentationPort } from "./application/frida/FridaInstrume
 import { Cli, z } from "incur";
 import {
   adaptCliOutputArgumentsForIncur,
+  declaredSensitiveValues,
   normalizeCliArguments,
   splitIncurBuiltinArguments,
   unknownMcpAddOption,
 } from "./cliBuiltinArguments.js";
+import { redactExplicitText } from "./domain/explicitSensitiveValues.js";
 import {
   parseCliOutputArguments,
   renderCliDocument,
@@ -319,7 +321,10 @@ export const createCli = (
             ? renderCliDocument(
                 {
                   code: "PARSE_ERROR",
-                  message: `Unknown flag: ${unknownOption}`,
+                  message: redactExplicitText(
+                    `Unknown flag: ${unknownOption}`,
+                    declaredSensitiveValues(command),
+                  ),
                 },
                 // A parse error is a document, not a selected row array.
                 output.format === "csv" || output.format === "tsv"
